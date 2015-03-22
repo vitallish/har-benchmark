@@ -134,7 +134,7 @@ cl<-makeCluster(4,type="SOCK")
 registerDoSNOW(cl)
 
 set.seed(1234)
-gbmMod5K<-train(x=train_sub[randSamp,],y=train_classe[randSamp],method="gbm",
+gbmMod5k<-train(x=train_sub[randSamp,],y=train_classe[randSamp],method="gbm",
                 tuneLength=10,
                 trControl= trainControl(method="cv",
                                         allowParallel = T, seeds = NULL))
@@ -148,8 +148,16 @@ stopCluster(cl)
 invisible(gc())
 
 }
+# Find Tuning Parameters
 
-# Create Models
+mrow<-which.max(gbmMod5k$results$Kappa)
+gbmMod5k$results[gbmMod5k$results$Kappa > (gbmMod5k$results$Kappa - gbmMod5k$results$KappaSD)[mrow],] %>%
+    ggplot(aes(x=interaction.depth, y = Kappa),data=.) + geom_line(aes(x=interaction.depth, y = Kappa,color=as.factor(n.trees)))
+
+mrow<-which.max(svmPredict5k$results$Kappa)
+svmPredict5k$results[svmPredict5k$results$Kappa > (svmPredict5k$results$Kappa - svmPredict5k$results$KappaSD)[mrow],]
+
+# Tune Final Model
 gbmModFinal<-train(x=train_sub,y=train_classe,method="gbm",
                    tuneGrid=data.frame(shrinkage = 0.1,interaction.depth = 5, n.trees=150),
                    trControl= trainControl(method="none",
@@ -169,28 +177,129 @@ cv_sub<-predict(dummyVar,cv_sub)
 
 cv_sub[,-c(1:6)] <- predict(pp_cent_scale,cv_sub[,-c(1:6)])
 
-
-
-# predict on CV
+#predict on cv
 gbmCVpredict<-predict(gbmModFinal, cv_sub)
-gbmCV<- gbmCVpredict== cv_classe
-mean(gbmCV)
+gbmConMat <- confusionMatrix(gbmCVpredict,cv_classe)
 
 svmCVpredict <-predict(svmModFinal, cv_sub)
-svmCV<-svmCVpredict== cv_classe
-mean(svmCV)
+svmConMat <- confusionMatrix(svmCVpredict,cv_classe)
+
+#preprocess test set
+
+test_raw <- read.csv(file.path("data","test.csv"),na.strings = c("NA","#DIV/0!"))
+
+
+test_pp<-test_raw[,-col_rm]
+test_pp$problem_id<-cv_classe[1:20]
+names(test_pp)[54] <- "classe"
+
+test_pp<-predict(dummyVar,test_pp)
+
+
+
+test_pp[,-c(1:6)] <- predict(pp_cent_scale,test_pp[,-c(1:6)])
+
+
+# predict on test set
+svmTESTpredict <-predict(svmModFinal, test_pp) %>% as.character
+
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    folder="final"
+    filepath = file.path(folder,filename)
+    write.table(x[i],file=filepath,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(svmTESTpredict)
 
 ```
 ## Preprocess
-The data is preprocessed by creating dummy variables for the 
+The data is preprocessed by creating dummy variables for the `user_name` variable along with scaling and centering the rest of the variables. The columns noted deletion in the exploratory section were also removed. See the Appendix
+
+## Tuning Models
+### General Strategy
+Models were tuned on a subset of the training set as the speed of computation was becoming a limiting factor in completing the analysis.`randSamp` contains 5000 purely random samples from the `train_sub`. To justify this, a gbm with tuneLength = 5 was run on the full `train_sub` dataset along with the data set of 5000 samples. While the Kappa was greater with the full set, the comparison between tuning factors was similar so I felt it was possible to choose the tuning parameters on the 5000 size dataset.
+
+#### Cross Validation
+Regular crossvalidation was performed during model tuning. While CV (not repeated) may suffer from high variance, when the training set is very large the variance should get smaller while allowing for computation efficiencies.[^2]
+
+Both the gbm and smv model will be tested on a held out cv set of `r nrow(cv_sub)` samples in order to estimate out of sample error.
+
+### Boosted Tree Model
+The graph below shows the training curves for the gbm model. The model that was used was chosen as being the simplest model within 1 SD of the best accuracy shown here.[^2] This turned out to be true as the KappaSD is <1% for each sampel. The out-of-sample Kappa for this model can be estimated to be **96%**.
+```{r cache = TRUE,echo = FALSE, warning=FALSE}
+ggplot(gbmMod5k) + ggtitle("Training Curves for Boosted Tree Model")
+
+mrow<-which.max(gbmMod5k$results$Kappa)
+gbmMod5k$results[gbmMod5k$results$Kappa > (gbmMod5k$results$Kappa - gbmMod5k$results$KappaSD)[mrow],] %>%
+    ggplot(aes(x=interaction.depth, y = Kappa),data=.) + 
+    geom_line(aes(x=interaction.depth, y = Kappa,color=as.factor(n.trees))) +
+    ggtitle("Training Curves for gbm model within 1 SD of Optimal Kappa")
+
+```
+
+### Radial SVM
+A similar strategy was taken with the svm model. Graphics won't be shown but the following rows show the models with Kappa within 1 SD
+```{r cache = TRUE, echo =FALSE, comment=""}
+mrow<-which.max(svmPredict5k$results$Kappa)
+svmPredict5k$results[svmPredict5k$results$Kappa > 
+                         (svmPredict5k$results$Kappa - svmPredict5k$results$KappaSD)[mrow],] %>% 
+    pander(style="rmarkdown")
+```
+
+From the above table I chose the simplest Model (C=32) which has an out of sample Kappa of 95.7%
+
+## Training Final Models
+
+The final gbm and svm finals are tuned using the paramaters decided above.
+```{r cache = TRUE, eval = FALSE}
+gbmModFinal<-train(x=train_sub,y=train_classe,method="gbm",
+                   tuneGrid=data.frame(shrinkage = 0.1,interaction.depth = 5, n.trees=150),
+                   trControl= trainControl(method="none",
+                                           allowParallel = F, seeds = NULL))
+
+svmModFinal<-train(x=train_sub,y=train_classe,method="svmRadial",
+                       tuneGrid=data.frame(C=32, sigma=0.01071563),
+                       trControl= trainControl(method="none",
+                                               allowParallel = F, seeds = NULL))
+
+```
 
 
+## Evaluating Final Models on held out CV set
+The final gbm model had a Kappa of **`r round(gbmConMat$overall[2]*100,1)`%** while the svm Model had a Kappa of **`r round(svmConMat$overall[2]*100,1)`%**. This suggests that the out-of-sample error is barely lower with the SVM model.
+The tables below show the confusion matrices for the two models. The Columns represent the "Reference" Values while the rows are the predictions:
+
+```{r cache = TRUE, echo =FALSE}
+gbmConMat$table %>% pander(style="rmarkdown", caption="Boosted Tree Model")
+
+svmConMat$table %>% pander(style="rmarkdown", caption="Radial SVM Model")
+
+```
+
+## Final Predictions
+
+Prediction was completed on held out test set of 20 and all 20 were correct using the SVM model.
+
+
+
+
+
+\pagebreak
+
+## Appendix
+### Exploration Code
+
+### Preprocess and Tune Code
+
+\pagebreak
 
 ## References
 [^1]: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
 
-\pagebreak
-## Appendix
-### Code
-
+[^2]: Kuhn, Max. Applied Predictive Modeling. [http://appliedpredictivemodeling.com/] 
 
