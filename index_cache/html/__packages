@@ -1,0 +1,15 @@
+base
+plyr
+dplyr
+ggplot2
+lattice
+caret
+foreach
+iterators
+snow
+doSNOW
+pander
+partykit
+survival
+gbm
+kernlab

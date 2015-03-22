@@ -1,0 +1,311 @@
+---
+title: "Weight Lifting Exercise Quality"
+author: "Vitaly Druker"
+date: "March 22, 2015"
+output: html_document
+---
+```{r explore, echo = FALSE, results='hide',message=FALSE, warning=FALSE, cache=TRUE}
+require(plyr); require(dplyr); require(ggplot2); require(caret)
+require(doSNOW); require(pander); require(partykit)
+
+# Download the Data ----
+if(!file.exists(file.path("data","train.csv"))){
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                  file.path("data","train.csv"))
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                  file.path("data","test.csv"))
+}
+# Import the training Set ----
+train_raw <- read.csv(file.path("data","train.csv"),na.strings = c("NA","#DIV/0!"))
+
+# select summary functions
+summ_stat_reg<-"^(kurtosis|skewness|max|min|amplitude|var|avg|stddev)_"
+summ_sel<-grep(summ_stat_reg,names(train_raw))
+
+misc_cols <- c(1,3:7)
+
+# combine into a list of all columns to remove initially
+col_rm <-c(summ_sel,misc_cols) %>% unique
+
+# Explore each variable----
+train_exp<-train_raw %>%
+    select(-col_rm)
+
+onetimeout_row<-which.min(train_raw$gyros_dumbbell_x)
+train_raw<-train_raw[-onetimeout_row,]
+
+```
+## Introduction
+
+## Explore the data
+### Removable Columns
+The training data is set up with **`r dim(train_raw)[1]`** samples with **`r dim(train_raw)[2]-1`** predictors. However, many of the predictors are not applicable. According the the publication[^1] on this dataset, summary functions were added to the dataset at set windows (0.5 seconds, 1 second etc.). These include all columns which include titles like kurtosis, avg, etc. They can be selected out using the regular expression: "`r summ_stat_reg`"
+
+Along with these calculated columns, there are a few columns from that are descriptor columns which are stored in the `misc_cols` variable.
+
+### Remaining Variables
+#### Class Imbalances
+The following table shows the breakdown of the classes of the remaining predictors. One of the factors is the output vector while the other is the `user_name`. The test set does contain the `user_name` variable so it will be a part of the predictor variables used in the models.
+```{r, cache = TRUE, echo =FALSE}
+train_exp %>%
+    sapply(class) %>%
+    table %>% as.data.frame %>% 
+    pander(style="rmarkdown")
+
+```
+
+The breakdown shows a slight class imbalance where the `A` class has about twice as many samples as the other factors. This is not a significant class imbalance.
+
+```{r, cache = TRUE, echo =FALSE}
+table(train_exp$classe) %>% as.data.frame %>% 
+    pander(style="rmarkdown")
+```
+
+#### Variable Distributions
+The variables' distribution are explored by graphing the density function. The plots show that many variables are multi-peaked and that they have a wide range of possible values. Centering and scaling will need to be done. However, it is unclear how to transform multi-peaked data into a more normal distribution. This suggests that tree-based models, which do not require a normal distribution for the predictors, may work well.
+
+```{r, cache = TRUE, echo =FALSE}
+featurePlot(x = train_exp[,c(2:6,32)], y=train_exp$classe,
+            plot = "density",
+            scales = list(x = list(relation="free"),
+                          y = list(relation="free")),
+            auto.key = list(columns = 5), alpha = 1/10)
+```
+
+Exploration of each variable showed that the `gyros_dumbell_x` column has an extreme outlier that seems to be some sort of error. This row is removed and can be found in the variable `onetimeout_row`. This greatly improves the histogram for `gyros_dumbbell_x`.
+
+```{r, cache = TRUE, echo =FALSE}
+featurePlot(x = train_exp$gyros_dumbbell_x[-onetimeout_row],
+            y = train_exp$classe[-onetimeout_row],
+            plot = "density",
+            scales = list(x = list(relation="free"),
+                          y = list(relation="free")),
+            auto.key = list(columns = 5), alpha = 1/10)
+```
+
+There are no NAs left in the data.
+
+#### PCA Exploration
+It may be benficial breakdown the model into fewer components. However, the plot shows that while PCA is able to subset out 5 seperate clumps, they do not appeart to capture the actual class of the exercise. This suggests that PCA my not be a fruitful transformation as the variance in the predictors don't appear to predict the output well.
+
+```{r cache=TRUE}
+train_exp<-train_exp[-onetimeout_row,]
+pcaObject<-prcomp(train_exp[2:53], center=T, scale=T)
+ggplot()+
+    geom_point(aes(x=pcaObject$x[,1], y = pcaObject$x[,2],
+                   color=train_exp$classe),alpha=0.2)
+
+```
+
+### Model CrossValidation Set
+There is enough data to justify breaking out another CV set for between model evaluation. These subsets are saved so that later analysis can be completed.
+
+```{r cache=TRUE}
+set.seed(12345)
+inTrain<-createDataPartition(train_raw$classe, p=.8, list=F)
+train_sub <- train_raw[inTrain,]
+cv_sub <- train_raw[-inTrain,]
+if(!file.exists(file.path("data","explored.R"))){
+    save(file = file.path("data","explored.R"), 
+         list=c("train_sub","cv_sub","col_rm"))
+}
+
+```
+```{r pp_tune, echo = FALSE, results='hide',message=FALSE, warning=FALSE, cache=TRUE}
+load(file.path("data","explored.R"))
+
+#Preprocessing----
+train_classe<-train_sub$classe
+train_sub<-train_sub[,-col_rm]
+dummyVar<-dummyVars(classe~.,train_sub)
+train_sub<-predict(dummyVar,train_sub)
+pp_cent_scale<- preProcess(train_sub[,-c(1:6)],method=c("scale","center"))
+train_sub[,-c(1:6)] <- predict(pp_cent_scale,train_sub[,-c(1:6)])
+
+# Tuning ----
+# Load tuned for report, if it exists
+if(file.exists(file.path("data","tuned.R"))){
+    load(file.path("data","tuned.R"))
+}else{
+    #this took about 40 minutes using 4 cores.
+set.seed(12345)
+randSamp<-sample(1:nrow(train_sub),5000)
+cl<-makeCluster(4,type="SOCK")
+registerDoSNOW(cl)
+
+set.seed(1234)
+gbmMod5k<-train(x=train_sub[randSamp,],y=train_classe[randSamp],method="gbm",
+                tuneLength=10,
+                trControl= trainControl(method="cv",
+                                        allowParallel = T, seeds = NULL))
+set.seed(1234)
+svmPredict5k<-train(x=train_sub[randSamp,],y=train_classe[randSamp],method="svmRadial",
+                    tuneLength=10,metric="Kappa",
+                    trControl= trainControl(method="cv",
+                                            allowParallel = T, seeds = NULL))
+
+stopCluster(cl)
+invisible(gc())
+
+}
+# Find Tuning Parameters
+
+mrow<-which.max(gbmMod5k$results$Kappa)
+gbmMod5k$results[gbmMod5k$results$Kappa > (gbmMod5k$results$Kappa - gbmMod5k$results$KappaSD)[mrow],] %>%
+    ggplot(aes(x=interaction.depth, y = Kappa),data=.) + geom_line(aes(x=interaction.depth, y = Kappa,color=as.factor(n.trees)))
+
+mrow<-which.max(svmPredict5k$results$Kappa)
+svmPredict5k$results[svmPredict5k$results$Kappa > (svmPredict5k$results$Kappa - svmPredict5k$results$KappaSD)[mrow],]
+
+# Tune Final Model
+gbmModFinal<-train(x=train_sub,y=train_classe,method="gbm",
+                   tuneGrid=data.frame(shrinkage = 0.1,interaction.depth = 5, n.trees=150),
+                   trControl= trainControl(method="none",
+                                           allowParallel = F, seeds = NULL))
+
+svmModFinal<-train(x=train_sub,y=train_classe,method="svmRadial",
+                       tuneGrid=data.frame(C=32, sigma=0.01071563),
+                       trControl= trainControl(method="none",
+                                               allowParallel = F, seeds = NULL))
+
+# preprocess the cv_sub set
+
+cv_classe<-cv_sub$classe
+cv_sub<-cv_sub[,-col_rm]
+
+cv_sub<-predict(dummyVar,cv_sub)
+
+cv_sub[,-c(1:6)] <- predict(pp_cent_scale,cv_sub[,-c(1:6)])
+
+#predict on cv
+gbmCVpredict<-predict(gbmModFinal, cv_sub)
+gbmConMat <- confusionMatrix(gbmCVpredict,cv_classe)
+
+svmCVpredict <-predict(svmModFinal, cv_sub)
+svmConMat <- confusionMatrix(svmCVpredict,cv_classe)
+
+#preprocess test set
+
+test_raw <- read.csv(file.path("data","test.csv"),na.strings = c("NA","#DIV/0!"))
+
+
+test_pp<-test_raw[,-col_rm]
+test_pp$problem_id<-cv_classe[1:20]
+names(test_pp)[54] <- "classe"
+
+test_pp<-predict(dummyVar,test_pp)
+
+
+
+test_pp[,-c(1:6)] <- predict(pp_cent_scale,test_pp[,-c(1:6)])
+
+
+# predict on test set
+svmTESTpredict <-predict(svmModFinal, test_pp) %>% as.character
+
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    folder="final"
+    filepath = file.path(folder,filename)
+    write.table(x[i],file=filepath,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(svmTESTpredict)
+
+```
+## Preprocess
+The data is preprocessed by creating dummy variables for the `user_name` variable along with scaling and centering the rest of the variables. The columns noted deletion in the exploratory section were also removed. See the Appendix
+
+## Tuning Models
+### General Strategy
+Models were tuned on a subset of the training set as the speed of computation was becoming a limiting factor in completing the analysis.`randSamp` contains 5000 purely random samples from the `train_sub`. To justify this, a gbm with tuneLength = 5 was run on the full `train_sub` dataset along with the data set of 5000 samples. While the Kappa was greater with the full set, the comparison between tuning factors was similar so I felt it was possible to choose the tuning parameters on the 5000 size dataset.
+
+#### Cross Validation
+Regular crossvalidation was performed during model tuning. While CV (not repeated) may suffer from high variance, when the training set is very large the variance should get smaller while allowing for computation efficiencies.[^2]
+
+Both the gbm and smv model will be tested on a held out cv set of `r nrow(cv_sub)` samples in order to estimate out of sample error.
+
+### Boosted Tree Model
+The graph below shows the training curves for the gbm model. The model that was used was chosen as being the simplest model within 1 SD of the best accuracy shown here.[^2] This turned out to be true as the KappaSD is <1% for each sampel. The out-of-sample Kappa for this model can be estimated to be **96%**.
+```{r cache = TRUE,echo = FALSE, warning=FALSE}
+ggplot(gbmMod5k) + ggtitle("Training Curves for Boosted Tree Model")
+
+mrow<-which.max(gbmMod5k$results$Kappa)
+gbmMod5k$results[gbmMod5k$results$Kappa > (gbmMod5k$results$Kappa - gbmMod5k$results$KappaSD)[mrow],] %>%
+    ggplot(aes(x=interaction.depth, y = Kappa),data=.) + 
+    geom_line(aes(x=interaction.depth, y = Kappa,color=as.factor(n.trees))) +
+    ggtitle("Training Curves for gbm model within 1 SD of Optimal Kappa")
+
+```
+
+### Radial SVM
+A similar strategy was taken with the svm model. Graphics won't be shown but the following rows show the models with Kappa within 1 SD
+```{r cache = TRUE, echo =FALSE, comment=""}
+mrow<-which.max(svmPredict5k$results$Kappa)
+svmPredict5k$results[svmPredict5k$results$Kappa > 
+                         (svmPredict5k$results$Kappa - svmPredict5k$results$KappaSD)[mrow],] %>% 
+    pander(style="rmarkdown")
+```
+
+From the above table I chose the simplest Model (C=32) which has an out of sample Kappa of 95.7%
+
+## Training Final Models
+
+The final gbm and svm finals are tuned using the paramaters decided above.
+```{r cache = TRUE, eval = FALSE}
+gbmModFinal<-train(x=train_sub,y=train_classe,method="gbm",
+                   tuneGrid=data.frame(shrinkage = 0.1,interaction.depth = 5, n.trees=150),
+                   trControl= trainControl(method="none",
+                                           allowParallel = F, seeds = NULL))
+
+svmModFinal<-train(x=train_sub,y=train_classe,method="svmRadial",
+                       tuneGrid=data.frame(C=32, sigma=0.01071563),
+                       trControl= trainControl(method="none",
+                                               allowParallel = F, seeds = NULL))
+
+```
+
+
+## Evaluating Final Models on held out CV set
+The final gbm model had a Kappa of **`r round(gbmConMat$overall[2]*100,1)`%** while the svm Model had a Kappa of **`r round(svmConMat$overall[2]*100,1)`%**. This suggests that the out-of-sample error is barely lower with the SVM model.
+The tables below show the confusion matrices for the two models. The Columns represent the "Reference" Values while the rows are the predictions:
+
+```{r cache = TRUE, echo =FALSE}
+gbmConMat$table %>% pander(style="rmarkdown", caption="Boosted Tree Model")
+
+svmConMat$table %>% pander(style="rmarkdown", caption="Radial SVM Model")
+
+```
+
+## Final Predictions
+
+Prediction was completed on held out test set of 20 and all 20 were correct using the SVM model.
+
+
+
+
+
+\pagebreak
+## Appendix
+### Exploration Code
+```{r ref.label = "explore", eval=FALSE, warnings = FALSE, message = FALSE}
+
+```
+
+### Preprocess and Tune Code
+```{r ref.label = "pp_tune", eval=FALSE, warnings = FALSE, message = FALSE}
+
+```
+
+
+\pagebreak
+
+## References
+[^1]: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+[^2]: Kuhn, Max. Applied Predictive Modeling. [http://appliedpredictivemodeling.com/] 
+
