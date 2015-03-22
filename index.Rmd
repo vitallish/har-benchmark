@@ -111,6 +111,7 @@ if(!file.exists(file.path("data","explored.R"))){
 }
 
 ```
+
 ```{r pp_tune, echo = FALSE, results='hide',message=FALSE, warning=FALSE, cache=TRUE}
 load(file.path("data","explored.R"))
 
@@ -151,8 +152,8 @@ invisible(gc())
 # Find Tuning Parameters
 
 mrow<-which.max(gbmMod5k$results$Kappa)
-gbmMod5k$results[gbmMod5k$results$Kappa > (gbmMod5k$results$Kappa - gbmMod5k$results$KappaSD)[mrow],] %>%
-    ggplot(aes(x=interaction.depth, y = Kappa),data=.) + geom_line(aes(x=interaction.depth, y = Kappa,color=as.factor(n.trees)))
+# gbmMod5k$results[gbmMod5k$results$Kappa > (gbmMod5k$results$Kappa - gbmMod5k$results$KappaSD)[mrow],]
+    
 
 mrow<-which.max(svmPredict5k$results$Kappa)
 svmPredict5k$results[svmPredict5k$results$Kappa > (svmPredict5k$results$Kappa - svmPredict5k$results$KappaSD)[mrow],]
@@ -217,6 +218,7 @@ pml_write_files = function(x){
 pml_write_files(svmTESTpredict)
 
 ```
+
 ## Preprocess
 The data is preprocessed by creating dummy variables for the `user_name` variable along with scaling and centering the rest of the variables. The columns noted deletion in the exploratory section were also removed. See the Appendix
 
@@ -231,6 +233,7 @@ Both the gbm and smv model will be tested on a held out cv set of `r nrow(cv_sub
 
 ### Boosted Tree Model
 The graph below shows the training curves for the gbm model. The model that was used was chosen as being the simplest model within 1 SD of the best accuracy shown here.[^2] This turned out to be true as the KappaSD is <1% for each sampel. The out-of-sample Kappa for this model can be estimated to be **96%**.
+
 ```{r cache = TRUE,echo = FALSE, warning=FALSE}
 ggplot(gbmMod5k) + ggtitle("Training Curves for Boosted Tree Model")
 
@@ -290,7 +293,9 @@ Prediction was completed on held out test set of 20 and all 20 were correct usin
 
 
 \pagebreak
+
 ## Appendix
+
 ### Exploration Code
 ```{r ref.label = "explore", eval=FALSE, warnings = FALSE, message = FALSE}
 
