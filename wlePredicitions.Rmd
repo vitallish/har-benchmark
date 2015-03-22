@@ -1,0 +1,196 @@
+---
+title: "Weight Lifting Exercise Quality"
+author: "Vitaly Druker"
+date: "March 22, 2015"
+output: html_document
+---
+```{r explore, echo = FALSE, results='hide',message=FALSE, warning=FALSE, cache=TRUE}
+require(plyr); require(dplyr); require(ggplot2); require(caret)
+require(doSNOW); require(pander); require(partykit)
+
+# Download the Data ----
+if(!file.exists(file.path("data","train.csv"))){
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                  file.path("data","train.csv"))
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                  file.path("data","test.csv"))
+}
+# Import the training Set ----
+train_raw <- read.csv(file.path("data","train.csv"),na.strings = c("NA","#DIV/0!"))
+
+# select summary functions
+summ_stat_reg<-"^(kurtosis|skewness|max|min|amplitude|var|avg|stddev)_"
+summ_sel<-grep(summ_stat_reg,names(train_raw))
+
+misc_cols <- c(1,3:7)
+
+# combine into a list of all columns to remove initially
+col_rm <-c(summ_sel,misc_cols) %>% unique
+
+# Explore each variable----
+train_exp<-train_raw %>%
+    select(-col_rm)
+
+onetimeout_row<-which.min(train_raw$gyros_dumbbell_x)
+train_raw<-train_raw[-onetimeout_row,]
+
+```
+## Introduction
+
+## Explore the data
+### Removable Columns
+The training data is set up with **`r dim(train_raw)[1]`** samples with **`r dim(train_raw)[2]-1`** predictors. However, many of the predictors are not applicable. According the the publication[^1] on this dataset, summary functions were added to the dataset at set windows (0.5 seconds, 1 second etc.). These include all columns which include titles like kurtosis, avg, etc. They can be selected out using the regular expression: "`r summ_stat_reg`"
+
+Along with these calculated columns, there are a few columns from that are descriptor columns which are stored in the `misc_cols` variable.
+
+### Remaining Variables
+#### Class Imbalances
+The following table shows the breakdown of the classes of the remaining predictors. One of the factors is the output vector while the other is the `user_name`. The test set does contain the `user_name` variable so it will be a part of the predictor variables used in the models.
+```{r, cache = TRUE, echo =FALSE}
+train_exp %>%
+    sapply(class) %>%
+    table %>% as.data.frame %>% 
+    pander(style="rmarkdown")
+
+```
+
+The breakdown shows a slight class imbalance where the `A` class has about twice as many samples as the other factors. This is not a significant class imbalance.
+
+```{r, cache = TRUE, echo =FALSE}
+table(train_exp$classe) %>% as.data.frame %>% 
+    pander(style="rmarkdown")
+```
+
+#### Variable Distributions
+The variables' distribution are explored by graphing the density function. The plots show that many variables are multi-peaked and that they have a wide range of possible values. Centering and scaling will need to be done. However, it is unclear how to transform multi-peaked data into a more normal distribution. This suggests that tree-based models, which do not require a normal distribution for the predictors, may work well.
+
+```{r, cache = TRUE, echo =FALSE}
+featurePlot(x = train_exp[,c(2:6,32)], y=train_exp$classe,
+            plot = "density",
+            scales = list(x = list(relation="free"),
+                          y = list(relation="free")),
+            auto.key = list(columns = 5), alpha = 1/10)
+```
+
+Exploration of each variable showed that the `gyros_dumbell_x` column has an extreme outlier that seems to be some sort of error. This row is removed and can be found in the variable `onetimeout_row`. This greatly improves the histogram for `gyros_dumbbell_x`.
+
+```{r, cache = TRUE, echo =FALSE}
+featurePlot(x = train_exp$gyros_dumbbell_x[-onetimeout_row],
+            y = train_exp$classe[-onetimeout_row],
+            plot = "density",
+            scales = list(x = list(relation="free"),
+                          y = list(relation="free")),
+            auto.key = list(columns = 5), alpha = 1/10)
+```
+
+There are no NAs left in the data.
+
+#### PCA Exploration
+It may be benficial breakdown the model into fewer components. However, the plot shows that while PCA is able to subset out 5 seperate clumps, they do not appeart to capture the actual class of the exercise. This suggests that PCA my not be a fruitful transformation as the variance in the predictors don't appear to predict the output well.
+
+```{r cache=TRUE}
+train_exp<-train_exp[-onetimeout_row,]
+pcaObject<-prcomp(train_exp[2:53], center=T, scale=T)
+ggplot()+
+    geom_point(aes(x=pcaObject$x[,1], y = pcaObject$x[,2],
+                   color=train_exp$classe),alpha=0.2)
+
+```
+
+### Model CrossValidation Set
+There is enough data to justify breaking out another CV set for between model evaluation. These subsets are saved so that later analysis can be completed.
+
+```{r cache=TRUE}
+set.seed(12345)
+inTrain<-createDataPartition(train_raw$classe, p=.8, list=F)
+train_sub <- train_raw[inTrain,]
+cv_sub <- train_raw[-inTrain,]
+if(!file.exists(file.path("data","explored.R"))){
+    save(file = file.path("data","explored.R"), 
+         list=c("train_sub","cv_sub","col_rm"))
+}
+
+```
+```{r pp_tune, echo = FALSE, results='hide',message=FALSE, warning=FALSE, cache=TRUE}
+load(file.path("data","explored.R"))
+
+#Preprocessing----
+train_classe<-train_sub$classe
+train_sub<-train_sub[,-col_rm]
+dummyVar<-dummyVars(classe~.,train_sub)
+train_sub<-predict(dummyVar,train_sub)
+pp_cent_scale<- preProcess(train_sub[,-c(1:6)],method=c("scale","center"))
+train_sub[,-c(1:6)] <- predict(pp_cent_scale,train_sub[,-c(1:6)])
+
+# Tuning ----
+# Load tuned for report, if it exists
+if(file.exists(file.path("data","tuned.R"))){
+    load(file.path("data","tuned.R"))
+}else{
+    #this took about 40 minutes using 4 cores.
+set.seed(12345)
+randSamp<-sample(1:nrow(train_sub),5000)
+cl<-makeCluster(4,type="SOCK")
+registerDoSNOW(cl)
+
+set.seed(1234)
+gbmMod5K<-train(x=train_sub[randSamp,],y=train_classe[randSamp],method="gbm",
+                tuneLength=10,
+                trControl= trainControl(method="cv",
+                                        allowParallel = T, seeds = NULL))
+set.seed(1234)
+svmPredict5k<-train(x=train_sub[randSamp,],y=train_classe[randSamp],method="svmRadial",
+                    tuneLength=10,metric="Kappa",
+                    trControl= trainControl(method="cv",
+                                            allowParallel = T, seeds = NULL))
+
+stopCluster(cl)
+invisible(gc())
+
+}
+
+# Create Models
+gbmModFinal<-train(x=train_sub,y=train_classe,method="gbm",
+                   tuneGrid=data.frame(shrinkage = 0.1,interaction.depth = 5, n.trees=150),
+                   trControl= trainControl(method="none",
+                                           allowParallel = F, seeds = NULL))
+
+svmModFinal<-train(x=train_sub,y=train_classe,method="svmRadial",
+                       tuneGrid=data.frame(C=32, sigma=0.01071563),
+                       trControl= trainControl(method="none",
+                                               allowParallel = F, seeds = NULL))
+
+# preprocess the cv_sub set
+
+cv_classe<-cv_sub$classe
+cv_sub<-cv_sub[,-col_rm]
+
+cv_sub<-predict(dummyVar,cv_sub)
+
+cv_sub[,-c(1:6)] <- predict(pp_cent_scale,cv_sub[,-c(1:6)])
+
+
+
+# predict on CV
+gbmCVpredict<-predict(gbmModFinal, cv_sub)
+gbmCV<- gbmCVpredict== cv_classe
+mean(gbmCV)
+
+svmCVpredict <-predict(svmModFinal, cv_sub)
+svmCV<-svmCVpredict== cv_classe
+mean(svmCV)
+
+```
+## Preprocess
+The data is preprocessed by creating dummy variables for the 
+
+
+
+## References
+[^1]: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+\pagebreak
+## Appendix
+### Code
+
+
