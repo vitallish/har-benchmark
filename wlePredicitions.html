@@ -382,15 +382,140 @@ svmModFinal&lt;-train(x=train_sub,y=train_classe,method=&quot;svmRadial&quot;,
 <div id="final-predictions" class="section level2">
 <h2>Final Predictions</h2>
 <p>Prediction was completed on held out test set of 20 and all 20 were correct using the SVM model.</p>
-<p></p>
-</div>
-<div id="appendix" class="section level2">
-<h2>Appendix</h2>
-<div id="exploration-code" class="section level3">
-<h3>Exploration Code</h3>
-</div>
+<p>## Appendix ### Exploration Code</p>
+<pre class="r"><code>require(plyr); require(dplyr); require(ggplot2); require(caret)
+require(doSNOW); require(pander); require(partykit)
+
+# Download the Data ----
+if(!file.exists(file.path(&quot;data&quot;,&quot;train.csv&quot;))){
+    download.file(&quot;https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv&quot;,
+                  file.path(&quot;data&quot;,&quot;train.csv&quot;))
+    download.file(&quot;https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv&quot;,
+                  file.path(&quot;data&quot;,&quot;test.csv&quot;))
+}
+# Import the training Set ----
+train_raw &lt;- read.csv(file.path(&quot;data&quot;,&quot;train.csv&quot;),na.strings = c(&quot;NA&quot;,&quot;#DIV/0!&quot;))
+
+# select summary functions
+summ_stat_reg&lt;-&quot;^(kurtosis|skewness|max|min|amplitude|var|avg|stddev)_&quot;
+summ_sel&lt;-grep(summ_stat_reg,names(train_raw))
+
+misc_cols &lt;- c(1,3:7)
+
+# combine into a list of all columns to remove initially
+col_rm &lt;-c(summ_sel,misc_cols) %&gt;% unique
+
+# Explore each variable----
+train_exp&lt;-train_raw %&gt;%
+    select(-col_rm)
+
+onetimeout_row&lt;-which.min(train_raw$gyros_dumbbell_x)
+train_raw&lt;-train_raw[-onetimeout_row,]</code></pre>
 <div id="preprocess-and-tune-code" class="section level3">
 <h3>Preprocess and Tune Code</h3>
+<pre class="r"><code>load(file.path(&quot;data&quot;,&quot;explored.R&quot;))
+
+#Preprocessing----
+train_classe&lt;-train_sub$classe
+train_sub&lt;-train_sub[,-col_rm]
+dummyVar&lt;-dummyVars(classe~.,train_sub)
+train_sub&lt;-predict(dummyVar,train_sub)
+pp_cent_scale&lt;- preProcess(train_sub[,-c(1:6)],method=c(&quot;scale&quot;,&quot;center&quot;))
+train_sub[,-c(1:6)] &lt;- predict(pp_cent_scale,train_sub[,-c(1:6)])
+
+# Tuning ----
+# Load tuned for report, if it exists
+if(file.exists(file.path(&quot;data&quot;,&quot;tuned.R&quot;))){
+    load(file.path(&quot;data&quot;,&quot;tuned.R&quot;))
+}else{
+    #this took about 40 minutes using 4 cores.
+set.seed(12345)
+randSamp&lt;-sample(1:nrow(train_sub),5000)
+cl&lt;-makeCluster(4,type=&quot;SOCK&quot;)
+registerDoSNOW(cl)
+
+set.seed(1234)
+gbmMod5k&lt;-train(x=train_sub[randSamp,],y=train_classe[randSamp],method=&quot;gbm&quot;,
+                tuneLength=10,
+                trControl= trainControl(method=&quot;cv&quot;,
+                                        allowParallel = T, seeds = NULL))
+set.seed(1234)
+svmPredict5k&lt;-train(x=train_sub[randSamp,],y=train_classe[randSamp],method=&quot;svmRadial&quot;,
+                    tuneLength=10,metric=&quot;Kappa&quot;,
+                    trControl= trainControl(method=&quot;cv&quot;,
+                                            allowParallel = T, seeds = NULL))
+
+stopCluster(cl)
+invisible(gc())
+
+}
+# Find Tuning Parameters
+
+mrow&lt;-which.max(gbmMod5k$results$Kappa)
+gbmMod5k$results[gbmMod5k$results$Kappa &gt; (gbmMod5k$results$Kappa - gbmMod5k$results$KappaSD)[mrow],] %&gt;%
+    ggplot(aes(x=interaction.depth, y = Kappa),data=.) + geom_line(aes(x=interaction.depth, y = Kappa,color=as.factor(n.trees)))
+
+mrow&lt;-which.max(svmPredict5k$results$Kappa)
+svmPredict5k$results[svmPredict5k$results$Kappa &gt; (svmPredict5k$results$Kappa - svmPredict5k$results$KappaSD)[mrow],]
+
+# Tune Final Model
+gbmModFinal&lt;-train(x=train_sub,y=train_classe,method=&quot;gbm&quot;,
+                   tuneGrid=data.frame(shrinkage = 0.1,interaction.depth = 5, n.trees=150),
+                   trControl= trainControl(method=&quot;none&quot;,
+                                           allowParallel = F, seeds = NULL))
+
+svmModFinal&lt;-train(x=train_sub,y=train_classe,method=&quot;svmRadial&quot;,
+                       tuneGrid=data.frame(C=32, sigma=0.01071563),
+                       trControl= trainControl(method=&quot;none&quot;,
+                                               allowParallel = F, seeds = NULL))
+
+# preprocess the cv_sub set
+
+cv_classe&lt;-cv_sub$classe
+cv_sub&lt;-cv_sub[,-col_rm]
+
+cv_sub&lt;-predict(dummyVar,cv_sub)
+
+cv_sub[,-c(1:6)] &lt;- predict(pp_cent_scale,cv_sub[,-c(1:6)])
+
+#predict on cv
+gbmCVpredict&lt;-predict(gbmModFinal, cv_sub)
+gbmConMat &lt;- confusionMatrix(gbmCVpredict,cv_classe)
+
+svmCVpredict &lt;-predict(svmModFinal, cv_sub)
+svmConMat &lt;- confusionMatrix(svmCVpredict,cv_classe)
+
+#preprocess test set
+
+test_raw &lt;- read.csv(file.path(&quot;data&quot;,&quot;test.csv&quot;),na.strings = c(&quot;NA&quot;,&quot;#DIV/0!&quot;))
+
+
+test_pp&lt;-test_raw[,-col_rm]
+test_pp$problem_id&lt;-cv_classe[1:20]
+names(test_pp)[54] &lt;- &quot;classe&quot;
+
+test_pp&lt;-predict(dummyVar,test_pp)
+
+
+
+test_pp[,-c(1:6)] &lt;- predict(pp_cent_scale,test_pp[,-c(1:6)])
+
+
+# predict on test set
+svmTESTpredict &lt;-predict(svmModFinal, test_pp) %&gt;% as.character
+
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0(&quot;problem_id_&quot;,i,&quot;.txt&quot;)
+    folder=&quot;final&quot;
+    filepath = file.path(folder,filename)
+    write.table(x[i],file=filepath,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(svmTESTpredict)</code></pre>
 <p></p>
 </div>
 </div>

@@ -290,11 +290,17 @@ Prediction was completed on held out test set of 20 and all 20 were correct usin
 
 
 \pagebreak
-
 ## Appendix
 ### Exploration Code
+```{r ref.label = "explore", eval=FALSE, warnings = FALSE, message = FALSE}
+
+```
 
 ### Preprocess and Tune Code
+```{r ref.label = "pp_tune", eval=FALSE, warnings = FALSE, message = FALSE}
+
+```
+
 
 \pagebreak
 
