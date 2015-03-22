@@ -37,6 +37,8 @@ train_raw<-train_raw[-onetimeout_row,]
 ```
 ## Introduction
 
+One possible application of machine learning with wearable fitness bands is not just predicting the type of activity, but if the activity is being preformed correctly. The data currently analyzed[^1] is data from four sensors placed on the dumbell, arm, belt and glove  of subjects performing dumbell curls. Subjects were asked to perform 5 version of a curl of varying quality. In this dataset A signifies the correct curl. Please see the paper linked in the references for more details.
+
 ## Explore the data
 ### Removable Columns
 The training data is set up with **`r dim(train_raw)[1]`** samples with **`r dim(train_raw)[2]-1`** predictors. However, many of the predictors are not applicable. According the the publication[^1] on this dataset, summary functions were added to the dataset at set windows (0.5 seconds, 1 second etc.). These include all columns which include titles like kurtosis, avg, etc. They can be selected out using the regular expression: "`r summ_stat_reg`"
